@@ -24,7 +24,7 @@ export type FanEmitterConfig = {
 
 export const DEFAULT_FAN_CONFIG: FanEmitterConfig = {
   enabled: true,
-  strength: 8,
+  strength: 12,
   radius: 6,
   coneAngle: 35,
   turbulence: 0.6,
@@ -377,17 +377,52 @@ export class ClothSimulation {
     return normal;
   }
 
-  update(delta: number, elapsed: number, config: ClothRuntimeConfig) {
+  update(delta: number, elapsed: number, config: ClothRuntimeConfig, windEmitter?: FanEmitter) {
     const safeDelta = Math.min(delta, 1 / 30);
     const timeStep = safeDelta * safeDelta;
     const intro = THREE.MathUtils.smoothstep(Math.min(elapsed / 3.2, 1), 0, 1);
     const wind = config.windStrength * intro;
     const pulse = this.pulseEnergy;
 
+    // Precompute wind emitter values if provided
+    const cosConeAngle = windEmitter?.enabled ? Math.cos(windEmitter.coneAngle) : null;
+    const pulseFactor = windEmitter?.enabled ? 1 + Math.sin(elapsed * 3.2) * windEmitter.pulse : 1;
+
     for (let i = 0; i < this.particles.length; i += 1) {
       const particle = this.particles[i];
       particle.acceleration.set(0, -config.gravity, 0);
       particle.force.set(0, -config.gravity, 0);
+
+      // === Fan wind force — applied inline so it survives the force reset ===
+      if (windEmitter?.enabled && !particle.pinned && cosConeAngle !== null) {
+        scratchA.subVectors(particle.position, windEmitter.position);
+        const distance = scratchA.length();
+
+        if (distance < windEmitter.radius && distance >= 0.001) {
+          scratchC.copy(scratchA).normalize();
+          const facing = windEmitter.direction.dot(scratchC);
+
+          if (facing >= cosConeAngle) {
+            const distanceFalloff = 1 - THREE.MathUtils.smoothstep(distance, 0, windEmitter.radius);
+            const angleFalloff = THREE.MathUtils.smoothstep(cosConeAngle, 1, facing);
+            // Multiply by 2.5 to make the visual effect clearly noticeable
+            const baseStrength = windEmitter.strength * distanceFalloff * angleFalloff * pulseFactor * 2.5;
+
+            scratchB.copy(windEmitter.direction).multiplyScalar(baseStrength);
+
+            if (windEmitter.turbulence > 0) {
+              const nx = simpleNoise3D(particle.position.x * 2.1, particle.position.y * 1.7, elapsed * 1.3);
+              const ny = simpleNoise3D(particle.position.x * 1.8, particle.position.y * 2.3, elapsed * 1.7 + 50);
+              const nz = simpleNoise3D(particle.position.x * 2.5, particle.position.y * 1.4, elapsed * 1.1 + 100);
+              scratchB.x += nx * windEmitter.turbulence * baseStrength * 0.45;
+              scratchB.y += ny * windEmitter.turbulence * baseStrength * 0.35;
+              scratchB.z += nz * windEmitter.turbulence * baseStrength * 0.25;
+            }
+
+            particle.force.add(scratchB);
+          }
+        }
+      }
 
       // Ambient wind (light global breeze, much reduced when fan is active)
       const xWave = particle.original.x * 1.9;

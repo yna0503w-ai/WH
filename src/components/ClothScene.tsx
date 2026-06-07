@@ -374,7 +374,6 @@ function ClothRig({
   }, [setControlsEnabled, setCursor, onFanPositionChange]);
 
   useFrame((state, delta) => {
-    // Apply wind emitter BEFORE simulation update
     // Transform fan position/direction into cloth group's local space
     const safeDelta = Math.min(delta, 1 / 30);
     if (clothGroupRef.current) {
@@ -387,9 +386,8 @@ function ClothRig({
         direction: localDir,
       };
     }
-    simulation.applyWindEmitter(_localEmitter.current, safeDelta, state.clock.elapsedTime);
 
-    simulation.update(delta, state.clock.elapsedTime, settings);
+    simulation.update(delta, state.clock.elapsedTime, settings, _localEmitter.current);
     const position = geometry.getAttribute("position") as THREE.BufferAttribute;
     simulation.writePositions(position.array as Float32Array);
     position.needsUpdate = true;
