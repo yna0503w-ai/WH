@@ -1,7 +1,7 @@
 import { useCallback, useRef, useState } from "react";
 import * as THREE from "three";
-import { RotateCcw, Sparkles, Waves, Wind } from "lucide-react";
-import { ClothRuntimeConfig } from "./physics/cloth";
+import { RotateCcw, Sparkles, Waves, Wind, Fan } from "lucide-react";
+import { ClothRuntimeConfig, FanEmitterConfig, DEFAULT_FAN_CONFIG } from "./physics/cloth";
 import { ClothScene } from "./components/ClothScene";
 import { PageTexture, PageVariant } from "./components/PageTexture";
 
@@ -27,6 +27,8 @@ export default function App() {
   const [resetSignal, setResetSignal] = useState(0);
   const [opacity, setOpacity] = useState(0.82);
   const [settings, setSettings] = useState<ClothRuntimeConfig>(DEFAULT_SETTINGS);
+  const [fanConfig, setFanConfig] = useState<FanEmitterConfig>(DEFAULT_FAN_CONFIG);
+  const [fanDebugEnabled, setFanDebugEnabled] = useState(false);
   const wheelLock = useRef(false);
 
   const handleTextureReady = useCallback((nextTexture: THREE.CanvasTexture) => {
@@ -39,6 +41,10 @@ export default function App() {
 
   const updateSetting = useCallback(<T extends keyof ClothRuntimeConfig>(key: T, value: ClothRuntimeConfig[T]) => {
     setSettings((current) => ({ ...current, [key]: value }));
+  }, []);
+
+  const updateFanConfig = useCallback(<K extends keyof FanEmitterConfig>(key: K, value: FanEmitterConfig[K]) => {
+    setFanConfig((current) => ({ ...current, [key]: value }));
   }, []);
 
   const requestVariant = useCallback((nextVariant: PageVariant) => {
@@ -69,6 +75,14 @@ export default function App() {
     [cycleVariant],
   );
 
+  const handleFanPositionChange = useCallback((x: number, y: number, z: number) => {
+    setFanConfig((current) => ({ ...current, posX: x, posY: y, posZ: z }));
+  }, []);
+
+  const handleFanRotationChange = useCallback((rotY: number, rotX: number) => {
+    setFanConfig((current) => ({ ...current, rotY, rotX }));
+  }, []);
+
   return (
     <main className="app-shell" onWheel={handleWheel}>
       <ClothScene
@@ -80,6 +94,10 @@ export default function App() {
         texture={texture}
         textureVersion={textureVersion}
         variant={variant}
+        fanConfig={fanConfig}
+        onFanPositionChange={handleFanPositionChange}
+        onFanRotationChange={handleFanRotationChange}
+        fanDebugEnabled={fanDebugEnabled}
       />
       <PageTexture variant={variant} onTextureReady={handleTextureReady} />
 
@@ -143,6 +161,121 @@ export default function App() {
           step={0.002}
           value={settings.wrinkleIntensity}
         />
+      </aside>
+
+      {/* Fan control panel */}
+      <aside className="scene-panel fan-panel">
+        <div className="panel-heading">
+          <Fan size={17} strokeWidth={2.1} />
+          <span>风扇参数</span>
+        </div>
+
+        <label className="control-toggle">
+          <span>风扇开关</span>
+          <input
+            checked={fanConfig.enabled}
+            onChange={(e) => updateFanConfig("enabled", e.target.checked)}
+            type="checkbox"
+          />
+        </label>
+
+        <ControlSlider
+          label="Fan Strength"
+          max={20}
+          min={0}
+          onChange={(value) => updateFanConfig("strength", value)}
+          step={0.5}
+          value={fanConfig.strength}
+        />
+        <ControlSlider
+          label="Fan Radius"
+          max={12}
+          min={1}
+          onChange={(value) => updateFanConfig("radius", value)}
+          step={0.5}
+          value={fanConfig.radius}
+        />
+        <ControlSlider
+          label="Cone Angle"
+          max={90}
+          min={5}
+          onChange={(value) => updateFanConfig("coneAngle", value)}
+          step={1}
+          value={fanConfig.coneAngle}
+        />
+        <ControlSlider
+          label="Turbulence"
+          max={2}
+          min={0}
+          onChange={(value) => updateFanConfig("turbulence", value)}
+          step={0.05}
+          value={fanConfig.turbulence}
+        />
+        <ControlSlider
+          label="Pulse"
+          max={1}
+          min={0}
+          onChange={(value) => updateFanConfig("pulse", value)}
+          step={0.05}
+          value={fanConfig.pulse}
+        />
+
+        <div className="panel-heading fan-pos-heading">
+          <span>风扇位置</span>
+        </div>
+        <ControlSlider
+          label="Pos X"
+          max={5}
+          min={-5}
+          onChange={(value) => updateFanConfig("posX", value)}
+          step={0.1}
+          value={fanConfig.posX}
+        />
+        <ControlSlider
+          label="Pos Y"
+          max={3}
+          min={-3}
+          onChange={(value) => updateFanConfig("posY", value)}
+          step={0.1}
+          value={fanConfig.posY}
+        />
+        <ControlSlider
+          label="Pos Z"
+          max={5}
+          min={-5}
+          onChange={(value) => updateFanConfig("posZ", value)}
+          step={0.1}
+          value={fanConfig.posZ}
+        />
+
+        <div className="panel-heading fan-pos-heading">
+          <span>风扇旋转</span>
+        </div>
+        <ControlSlider
+          label="Rot Y"
+          max={Math.PI}
+          min={-Math.PI}
+          onChange={(value) => updateFanConfig("rotY", value)}
+          step={0.05}
+          value={fanConfig.rotY}
+        />
+        <ControlSlider
+          label="Rot X"
+          max={Math.PI / 2}
+          min={-Math.PI / 2}
+          onChange={(value) => updateFanConfig("rotX", value)}
+          step={0.05}
+          value={fanConfig.rotX}
+        />
+
+        <label className="control-toggle">
+          <span>Debug 可视化</span>
+          <input
+            checked={fanDebugEnabled}
+            onChange={(e) => setFanDebugEnabled(e.target.checked)}
+            type="checkbox"
+          />
+        </label>
       </aside>
 
       <footer className="scene-status">

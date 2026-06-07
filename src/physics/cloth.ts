@@ -8,6 +8,64 @@ export type ClothRuntimeConfig = {
   wrinkleIntensity: number;
 };
 
+export type FanEmitterConfig = {
+  enabled: boolean;
+  strength: number;
+  radius: number;
+  coneAngle: number;
+  turbulence: number;
+  pulse: number;
+  posX: number;
+  posY: number;
+  posZ: number;
+  rotY: number;
+  rotX: number;
+};
+
+export const DEFAULT_FAN_CONFIG: FanEmitterConfig = {
+  enabled: true,
+  strength: 8,
+  radius: 6,
+  coneAngle: 35,
+  turbulence: 0.6,
+  pulse: 0.2,
+  posX: 2.82,
+  posY: -1.22,
+  posZ: 0.46,
+  rotY: -0.48,
+  rotX: 0,
+};
+
+export type FanEmitter = {
+  enabled: boolean;
+  position: THREE.Vector3;
+  direction: THREE.Vector3;
+  strength: number;
+  radius: number;
+  coneAngle: number; // radians
+  turbulence: number;
+  pulse: number;
+};
+
+const _euler = new THREE.Euler(0, 0, 0, "YXZ");
+const _dir = new THREE.Vector3(0, 0, -1);
+
+export function buildFanEmitter(config: FanEmitterConfig): FanEmitter {
+  _dir.set(0, 0, -1);
+  _euler.set(config.rotX, config.rotY, 0);
+  _dir.applyEuler(_euler).normalize();
+  return {
+    enabled: config.enabled,
+    position: new THREE.Vector3(config.posX, config.posY, config.posZ),
+    direction: _dir.clone(),
+    strength: config.strength,
+    radius: config.radius,
+    coneAngle: (config.coneAngle * Math.PI) / 180,
+    turbulence: config.turbulence,
+    pulse: config.pulse,
+  };
+}
+
 export type ClothOptions = {
   width: number;
   height: number;
@@ -36,6 +94,13 @@ type Constraint = {
 
 const scratchA = new THREE.Vector3();
 const scratchB = new THREE.Vector3();
+const scratchC = new THREE.Vector3();
+
+// Simple 3D noise approximation for turbulence
+function simpleNoise3D(x: number, y: number, z: number): number {
+  const n = Math.sin(x * 12.9898 + y * 78.233 + z * 45.164) * 43758.5453;
+  return (n - Math.floor(n)) * 2 - 1;
+}
 
 export class ClothSimulation {
   readonly options: ClothOptions;
@@ -203,6 +268,115 @@ export class ClothSimulation {
     }
   }
 
+  /**
+   * Apply wind from a FanEmitter to all cloth particles.
+   * This is called every frame before constraint solving.
+   */
+  applyWindEmitter(emitter: FanEmitter, deltaTime: number, elapsed: number) {
+    if (!emitter.enabled) {
+      return;
+    }
+
+    const cosConeAngle = Math.cos(emitter.coneAngle);
+    const pulseFactor = 1 + Math.sin(elapsed * 3.2) * emitter.pulse;
+
+    for (let i = 0; i < this.particles.length; i += 1) {
+      const particle = this.particles[i];
+      if (particle.pinned) {
+        continue;
+      }
+
+      // Vector from fan to particle
+      scratchA.subVectors(particle.position, emitter.position);
+      const distance = scratchA.length();
+
+      // Skip if outside radius
+      if (distance >= emitter.radius || distance < 0.001) {
+        continue;
+      }
+
+      scratchC.copy(scratchA).normalize();
+
+      // Check if particle is in front of the fan (dot product with fan direction)
+      const facing = emitter.direction.dot(scratchC);
+      if (facing < cosConeAngle) {
+        // Outside the cone angle, no wind
+        continue;
+      }
+
+      // Distance falloff: stronger when closer
+      const distanceFalloff = 1 - THREE.MathUtils.smoothstep(distance, 0, emitter.radius);
+
+      // Angle falloff: stronger when more aligned with fan center
+      const angleFalloff = THREE.MathUtils.smoothstep(cosConeAngle, 1, facing);
+
+      // Base wind force along fan direction
+      const baseStrength = emitter.strength * distanceFalloff * angleFalloff * pulseFactor;
+
+      scratchB.copy(emitter.direction).multiplyScalar(baseStrength);
+
+      // Turbulence: add noise-based perturbation
+      if (emitter.turbulence > 0) {
+        const nx = simpleNoise3D(particle.position.x * 2.1, particle.position.y * 1.7, elapsed * 1.3);
+        const ny = simpleNoise3D(particle.position.x * 1.8, particle.position.y * 2.3, elapsed * 1.7 + 50);
+        const nz = simpleNoise3D(particle.position.x * 2.5, particle.position.y * 1.4, elapsed * 1.1 + 100);
+        scratchB.x += nx * emitter.turbulence * baseStrength * 0.45;
+        scratchB.y += ny * emitter.turbulence * baseStrength * 0.35;
+        scratchB.z += nz * emitter.turbulence * baseStrength * 0.25;
+      }
+
+      // Apply force to particle
+      particle.force.add(scratchB);
+    }
+  }
+
+  /**
+   * Apply a force to a specific particle by index
+   */
+  applyForceToParticle(index: number, force: THREE.Vector3) {
+    if (index >= 0 && index < this.particles.length) {
+      this.particles[index].force.add(force);
+    }
+  }
+
+  /**
+   * Compute the approximate normal at a particle position using neighboring particles.
+   * Useful for pressure calculations.
+   */
+  computeParticleNormal(index: number): THREE.Vector3 {
+    const { segmentsX, segmentsY } = this.options;
+    const x = index % (segmentsX + 1);
+    const y = Math.floor(index / (segmentsX + 1));
+
+    const p = this.particles[index].position;
+    const normal = new THREE.Vector3(0, 0, 1);
+
+    const left = x > 0 ? this.particles[index - 1].position : null;
+    const right = x < segmentsX ? this.particles[index + 1].position : null;
+    const up = y > 0 ? this.particles[index - (segmentsX + 1)].position : null;
+    const down = y < segmentsY ? this.particles[index + (segmentsX + 1)].position : null;
+
+    if (right && up) {
+      scratchA.subVectors(right, p);
+      scratchB.subVectors(up, p);
+      normal.crossVectors(scratchA, scratchB).normalize();
+    } else if (left && down) {
+      scratchA.subVectors(left, p);
+      scratchB.subVectors(down, p);
+      normal.crossVectors(scratchA, scratchB).normalize();
+    } else if (right) {
+      scratchA.subVectors(right, p);
+      scratchB.set(0, 1, 0);
+      normal.crossVectors(scratchA, scratchB).normalize();
+    } else if (down) {
+      scratchA.subVectors(down, p);
+      scratchB.set(1, 0, 0);
+      normal.crossVectors(scratchB, scratchA).normalize();
+    }
+
+    return normal;
+  }
+
   update(delta: number, elapsed: number, config: ClothRuntimeConfig) {
     const safeDelta = Math.min(delta, 1 / 30);
     const timeStep = safeDelta * safeDelta;
@@ -215,6 +389,7 @@ export class ClothSimulation {
       particle.acceleration.set(0, -config.gravity, 0);
       particle.force.set(0, -config.gravity, 0);
 
+      // Ambient wind (light global breeze, much reduced when fan is active)
       const xWave = particle.original.x * 1.9;
       const yWave = particle.original.y * 2.7;
       const clothWave = Math.sin(elapsed * 1.32 + xWave) + Math.cos(elapsed * 0.87 + yWave);

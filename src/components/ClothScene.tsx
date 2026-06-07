@@ -1,9 +1,10 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Canvas, ThreeEvent, useFrame, useThree } from "@react-three/fiber";
-import { ContactShadows, Environment, Line, OrbitControls } from "@react-three/drei";
+import { ContactShadows, Environment, OrbitControls } from "@react-three/drei";
 import * as THREE from "three";
-import { ClothRuntimeConfig, ClothSimulation } from "../physics/cloth";
+import { ClothRuntimeConfig, ClothSimulation, buildFanEmitter, FanEmitterConfig, FanEmitter } from "../physics/cloth";
 import type { PageVariant } from "./PageTexture";
+import { FanComponent } from "./FanComponent";
 
 type ClothSceneProps = {
   interactionSignal: number;
@@ -14,6 +15,10 @@ type ClothSceneProps = {
   textureVersion: number;
   variant: PageVariant;
   settings: ClothRuntimeConfig;
+  fanConfig: FanEmitterConfig;
+  onFanPositionChange: (x: number, y: number, z: number) => void;
+  onFanRotationChange: (rotY: number, rotX: number) => void;
+  fanDebugEnabled: boolean;
 };
 
 const CLOTH_WIDTH = 4.9;
@@ -47,6 +52,10 @@ export function ClothScene({
   texture,
   textureVersion,
   variant,
+  fanConfig,
+  onFanPositionChange,
+  onFanRotationChange,
+  fanDebugEnabled,
 }: ClothSceneProps) {
   const [controlsEnabled, setControlsEnabled] = useState(true);
 
@@ -72,8 +81,11 @@ export function ClothScene({
         textureVersion={textureVersion}
         variant={variant}
         setControlsEnabled={setControlsEnabled}
+        fanConfig={fanConfig}
+        onFanPositionChange={onFanPositionChange}
+        onFanRotationChange={onFanRotationChange}
+        fanDebugEnabled={fanDebugEnabled}
       />
-      <StudioFan />
       <mesh receiveShadow rotation-x={-Math.PI / 2} position={[0, -1.72, 0.1]}>
         <planeGeometry args={[10, 8]} />
         <shadowMaterial opacity={0.12} />
@@ -147,6 +159,11 @@ function ClothRig({
   setControlsEnabled,
   texture,
   textureVersion,
+  variant,
+  fanConfig,
+  onFanPositionChange,
+  onFanRotationChange,
+  fanDebugEnabled,
 }: ClothSceneProps & { setControlsEnabled: (enabled: boolean) => void }) {
   const { camera, gl } = useThree();
   const simulation = useMemo(
@@ -172,6 +189,17 @@ function ClothRig({
   const pendingClickUv = useRef<THREE.Vector2 | null>(null);
   const pendingClickLocal = useRef(new THREE.Vector3());
   const fade = useRef(1);
+
+  // Fan references
+  const fanGroupRef = useRef<THREE.Group>(null);
+  const fanEmitter = useRef<FanEmitter>(buildFanEmitter(fanConfig));
+  const clothGroupRef = useRef<THREE.Group>(null);
+  const _localEmitter = useRef<FanEmitter>(buildFanEmitter(fanConfig));
+
+  // Rebuild fan emitter when config changes
+  useEffect(() => {
+    fanEmitter.current = buildFanEmitter(fanConfig);
+  }, [fanConfig]);
 
   const setCursor = useCallback(
     (cursor: "auto" | "grab" | "grabbing") => {
@@ -329,7 +357,38 @@ function ClothRig({
     [endDrag, setCursor, simulation],
   );
 
+  // Sync fan group position back to parent
+  const handleFanDragStart = useCallback(() => {
+    setControlsEnabled(false);
+    setCursor("grabbing");
+  }, [setControlsEnabled, setCursor]);
+
+  const handleFanDragEnd = useCallback(() => {
+    setControlsEnabled(true);
+    setCursor("grab");
+    // Read the fan group's world position and propagate to parent
+    if (fanGroupRef.current) {
+      const pos = fanGroupRef.current.position;
+      onFanPositionChange(pos.x, pos.y, pos.z);
+    }
+  }, [setControlsEnabled, setCursor, onFanPositionChange]);
+
   useFrame((state, delta) => {
+    // Apply wind emitter BEFORE simulation update
+    // Transform fan position/direction into cloth group's local space
+    const safeDelta = Math.min(delta, 1 / 30);
+    if (clothGroupRef.current) {
+      const localPos = clothGroupRef.current.worldToLocal(fanEmitter.current.position.clone());
+      const normalMatrix = new THREE.Matrix3().getNormalMatrix(clothGroupRef.current.matrixWorld);
+      const localDir = fanEmitter.current.direction.clone().applyMatrix3(normalMatrix).normalize();
+      _localEmitter.current = {
+        ...fanEmitter.current,
+        position: localPos,
+        direction: localDir,
+      };
+    }
+    simulation.applyWindEmitter(_localEmitter.current, safeDelta, state.clock.elapsedTime);
+
     simulation.update(delta, state.clock.elapsedTime, settings);
     const position = geometry.getAttribute("position") as THREE.BufferAttribute;
     simulation.writePositions(position.array as Float32Array);
@@ -353,7 +412,15 @@ function ClothRig({
   });
 
   return (
-    <group rotation={[0.03, -0.22, -0.035]} position={[0, 0.12, 0]}>
+    <>
+      <FanComponent
+        config={fanConfig}
+        fanGroupRef={fanGroupRef}
+        onDragStart={handleFanDragStart}
+        onDragEnd={handleFanDragEnd}
+        debugMode={fanDebugEnabled}
+      />
+      <group ref={clothGroupRef} rotation={[0.03, -0.22, -0.035]} position={[0, 0.12, 0]}>
       <Line
         color="#868c96"
         lineWidth={1}
@@ -427,6 +494,7 @@ function ClothRig({
         <meshStandardMaterial color="#2f6cff" metalness={0.12} roughness={0.22} />
       </mesh>
     </group>
+    </>
   );
 }
 
@@ -471,36 +539,30 @@ function Clip({ position }: { position: [number, number, number] }) {
   );
 }
 
-function StudioFan() {
+function Line({
+  color,
+  lineWidth,
+  points,
+  transparent,
+  opacity,
+}: {
+  color: string;
+  lineWidth: number;
+  points: number[][];
+  transparent?: boolean;
+  opacity?: number;
+}) {
+  const geometry = useMemo(() => {
+    const pts = points.map((p) => new THREE.Vector3(p[0], p[1], p[2]));
+    const geo = new THREE.BufferGeometry().setFromPoints(pts);
+    return geo;
+  }, [points]);
+
   return (
-    <group position={[2.82, -1.22, 0.46]} rotation={[0, -0.48, 0]} scale={0.82}>
-      <mesh receiveShadow rotation={[Math.PI / 2, 0, 0]}>
-        <cylinderGeometry args={[0.36, 0.44, 0.055, 48]} />
-        <meshStandardMaterial color="#f4f6f8" roughness={0.36} />
-      </mesh>
-      <mesh position={[0, 0.45, 0]}>
-        <cylinderGeometry args={[0.035, 0.044, 0.9, 24]} />
-        <meshStandardMaterial color="#eef2f6" roughness={0.28} />
-      </mesh>
-      <mesh position={[0, 0.94, 0.02]} rotation={[0, Math.PI / 2, 0]}>
-        <cylinderGeometry args={[0.105, 0.12, 0.28, 32]} />
-        <meshStandardMaterial color="#f7f8fa" roughness={0.22} />
-      </mesh>
-      <mesh position={[0, 0.94, 0.21]} rotation={[0, Math.PI / 2, 0]}>
-        <torusGeometry args={[0.27, 0.01, 12, 56]} />
-        <meshStandardMaterial color="#d8dde5" metalness={0.08} roughness={0.18} />
-      </mesh>
-      {[0, 1, 2].map((blade) => (
-        <mesh key={blade} position={[0, 0.94, 0.21]} rotation={[0, Math.PI / 2, (blade * Math.PI * 2) / 3]}>
-          <boxGeometry args={[0.04, 0.23, 0.012]} />
-          <meshStandardMaterial color="#ffffff" transparent opacity={0.48} roughness={0.2} />
-        </mesh>
-      ))}
-      <mesh position={[0.26, -0.03, 0.11]}>
-        <sphereGeometry args={[0.025, 16, 12]} />
-        <meshStandardMaterial color="#7ee4ca" emissive="#5cd9bd" emissiveIntensity={0.28} />
-      </mesh>
-    </group>
+    <line>
+      <primitive object={geometry} attach="geometry" />
+      <lineBasicMaterial color={color} transparent={transparent} opacity={opacity} />
+    </line>
   );
 }
 
@@ -602,7 +664,7 @@ function roundRect(ctx: CanvasRenderingContext2D, x: number, y: number, width: n
   ctx.moveTo(x + radius, y);
   ctx.arcTo(x + width, y, x + width, y + height, radius);
   ctx.arcTo(x + width, y + height, x, y + height, radius);
-  ctx.arcTo(x, y + height, x, y, radius);
+  ctx.arcTo(x, y + height, y, x, radius);
   ctx.arcTo(x, y, x + width, y, radius);
   ctx.closePath();
 }
