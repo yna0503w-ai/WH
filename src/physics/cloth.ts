@@ -32,8 +32,8 @@ export const DEFAULT_FAN_CONFIG: FanEmitterConfig = {
   posX: 2.82,
   posY: -1.22,
   posZ: 0.46,
-  rotY: -0.48,
-  rotX: 0,
+  rotY: 1.25,
+  rotX: 0.35,
 };
 
 export type FanEmitter = {
@@ -47,16 +47,24 @@ export type FanEmitter = {
   pulse: number;
 };
 
-const _euler = new THREE.Euler(0, 0, 0, "YXZ");
+const _euler = new THREE.Euler(0, 0, 0, "XYZ");
 const _dir = new THREE.Vector3(0, 0, -1);
 
 export function buildFanEmitter(config: FanEmitterConfig): FanEmitter {
   _dir.set(0, 0, -1);
-  _euler.set(config.rotX, config.rotY, 0);
+  _euler.set(config.rotX, config.rotY, 0, "XYZ");
   _dir.applyEuler(_euler).normalize();
+
+  // Calculate the world offset of the fan blades (0, 0.94 * 0.82, 0)
+  // where 0.82 is the visual scale of the fan group in ClothScene.tsx
+  const localOffset = new THREE.Vector3(0, 0.94 * 0.82, 0);
+  localOffset.applyEuler(_euler);
+
+  const worldPos = new THREE.Vector3(config.posX, config.posY, config.posZ).add(localOffset);
+
   return {
     enabled: config.enabled,
-    position: new THREE.Vector3(config.posX, config.posY, config.posZ),
+    position: worldPos,
     direction: _dir.clone(),
     strength: config.strength,
     radius: config.radius,
@@ -404,19 +412,42 @@ export class ClothSimulation {
 
           if (facing >= cosConeAngle) {
             const distanceFalloff = 1 - THREE.MathUtils.smoothstep(distance, 0, windEmitter.radius);
-            const angleFalloff = THREE.MathUtils.smoothstep(cosConeAngle, 1, facing);
-            // Multiply by 2.5 to make the visual effect clearly noticeable
-            const baseStrength = windEmitter.strength * distanceFalloff * angleFalloff * pulseFactor * 2.5;
+            // Gentler angle falloff so wind doesn't drop to 0 at the cone boundaries
+            const angleFalloff = 0.45 + 0.55 * THREE.MathUtils.smoothstep(cosConeAngle, 1, facing);
+            // Scaled up by 32.0 (up from 3.5) for robust physical impact
+            const baseStrength = windEmitter.strength * distanceFalloff * angleFalloff * pulseFactor * 32.0;
 
-            scratchB.copy(windEmitter.direction).multiplyScalar(baseStrength);
+            // Get particle surface normal
+            const normal = this.computeParticleNormal(i);
 
+            // Aerodynamic Lift and Drag model:
+            const dotNormal = normal.dot(windEmitter.direction);
+
+            // Drag component along wind direction (stronger push forward)
+            const dragCoeff = 0.85;
+            scratchB.copy(windEmitter.direction).multiplyScalar(baseStrength * dragCoeff);
+
+            // Lift/Pressure component along cloth normal (pushed away from wind source)
+            const liftCoeff = 1.25;
+            const normalForceDir = normal.clone().multiplyScalar(Math.sign(dotNormal) || 1);
+            scratchB.addScaledVector(normalForceDir, baseStrength * liftCoeff * Math.abs(dotNormal));
+
+            // Dynamic wave-based flutter and turbulence
             if (windEmitter.turbulence > 0) {
-              const nx = simpleNoise3D(particle.position.x * 2.1, particle.position.y * 1.7, elapsed * 1.3);
-              const ny = simpleNoise3D(particle.position.x * 1.8, particle.position.y * 2.3, elapsed * 1.7 + 50);
-              const nz = simpleNoise3D(particle.position.x * 2.5, particle.position.y * 1.4, elapsed * 1.1 + 100);
-              scratchB.x += nx * windEmitter.turbulence * baseStrength * 0.45;
-              scratchB.y += ny * windEmitter.turbulence * baseStrength * 0.35;
-              scratchB.z += nz * windEmitter.turbulence * baseStrength * 0.25;
+              // Propagating wave phase based on distance from fan and time
+              const wavePhase = elapsed * 15.5 - distance * 4.2;
+              const noiseX = simpleNoise3D(particle.position.x * 2.1, particle.position.y * 1.7, elapsed * 1.3);
+              const noiseY = simpleNoise3D(particle.position.x * 1.8, particle.position.y * 2.3, elapsed * 1.7 + 50);
+              
+              // Wave-based flutter ripple along normal
+              const flutterWave = Math.sin(wavePhase) * windEmitter.turbulence * baseStrength * 0.75;
+
+              // Turbulent noise perturbation in XY
+              scratchB.x += noiseX * windEmitter.turbulence * baseStrength * 0.45;
+              scratchB.y += noiseY * windEmitter.turbulence * baseStrength * 0.35;
+
+              // Apply the propagating ripple along normal
+              scratchB.addScaledVector(normalForceDir, flutterWave);
             }
 
             particle.force.add(scratchB);

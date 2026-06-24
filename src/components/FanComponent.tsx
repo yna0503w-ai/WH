@@ -8,10 +8,12 @@ type FanComponentProps = {
   fanGroupRef: React.RefObject<THREE.Group | null>;
   onDragStart?: () => void;
   onDragEnd?: () => void;
+  onHoverStart?: () => void;
+  onHoverEnd?: () => void;
   debugMode: boolean;
 };
 
-export function FanComponent({ config, fanGroupRef, onDragStart, onDragEnd, debugMode }: FanComponentProps) {
+export function FanComponent({ config, fanGroupRef, onDragStart, onDragEnd, onHoverStart, onHoverEnd, debugMode }: FanComponentProps) {
   const bladesRef = useRef<THREE.Group>(null);
   const bladeRotation = useRef(0);
   const coneRef = useRef<THREE.Mesh>(null);
@@ -83,6 +85,19 @@ export function FanComponent({ config, fanGroupRef, onDragStart, onDragEnd, debu
     onDragEnd?.();
   };
 
+  const handlePointerEnter = (e: any) => {
+    e.stopPropagation();
+    onHoverStart?.();
+  };
+
+  const handlePointerLeave = (e: any) => {
+    e.stopPropagation();
+    if (isDragging.current) {
+      handlePointerUp(e);
+    }
+    onHoverEnd?.();
+  };
+
   const indicatorOpacity = config.enabled ? 1 : 0.35;
 
   return (
@@ -94,8 +109,15 @@ export function FanComponent({ config, fanGroupRef, onDragStart, onDragEnd, debu
       onPointerDown={handlePointerDown}
       onPointerMove={handlePointerMove}
       onPointerUp={handlePointerUp}
-      onPointerLeave={handlePointerUp}
+      onPointerEnter={handlePointerEnter}
+      onPointerLeave={handlePointerLeave}
     >
+      {/* Invisible enlarged hit area for easier interaction */}
+      <mesh visible={false} position={[0, 0.5, 0]}>
+        <boxGeometry args={[0.9, 1.3, 0.5]} />
+        <meshBasicMaterial transparent opacity={0} />
+      </mesh>
+
       {/* Base — flat disc on ground */}
       <mesh receiveShadow rotation={[Math.PI / 2, 0, 0]} position={[0, 0.028, 0]}>
         <cylinderGeometry args={[0.36, 0.44, 0.055, 48]} />
@@ -159,19 +181,93 @@ export function FanComponent({ config, fanGroupRef, onDragStart, onDragEnd, debu
 
       {/* Debug: Streamlines */}
       <group ref={streamlinesRef} position={[0, 0.94, 0]} visible={debugMode}>
-        {Array.from({ length: 5 }).map((_, i) => {
-          const angle = ((i - 2) / 4) * ((config.coneAngle * Math.PI) / 180) * 0.7;
-          const length = config.strength * 0.12;
-          const offsetX = Math.sin(angle) * 0.12;
-          const offsetY = Math.cos(angle) * 0.12;
-          const points = [new THREE.Vector3(offsetX, offsetY, 0), new THREE.Vector3(offsetX, offsetY, -length)];
-          const geo = new THREE.BufferGeometry().setFromPoints(points);
-          const lineOpacity = Math.min(0.6, config.strength * 0.06);
+        {Array.from({ length: 6 }).map((_, i) => {
+          // Spread streamline angles symmetrically around the cone
+          const angle = ((i - 2.5) / 5) * ((config.coneAngle * Math.PI) / 180) * 0.75;
           return (
-            <primitive key={i} object={new THREE.Line(geo, new THREE.LineBasicMaterial({ color: "#2f6cff", transparent: true, opacity: lineOpacity }))} />
+            <Streamline
+              key={i}
+              angle={angle}
+              config={config}
+              index={i}
+            />
           );
         })}
       </group>
     </group>
+  );
+}
+
+type StreamlineProps = {
+  angle: number;
+  config: FanEmitterConfig;
+  index: number;
+};
+
+function Streamline({ angle, config, index }: StreamlineProps) {
+  const lineRef = useRef<THREE.Line>(null);
+
+  // Buffer geometry with 2 points (start, end)
+  const geometry = useMemo(() => {
+    const pts = [new THREE.Vector3(0, 0, 0), new THREE.Vector3(0, 0, -1)];
+    return new THREE.BufferGeometry().setFromPoints(pts);
+  }, []);
+
+  const baseLineOpacity = Math.min(0.65, config.strength * 0.08);
+
+  useFrame((state) => {
+    if (!lineRef.current || !config.enabled) return;
+
+    // Streamline flow speed scales with wind strength
+    const speed = 1.2 + config.strength * 0.5;
+    const maxZ = -config.radius;
+
+    // Stagger starts for each streamline using index
+    const progress = (state.clock.elapsedTime * speed + index * 0.95) % config.radius;
+
+    // Determine the start and end of the line segment along local -Z
+    const segmentLength = 0.45 + config.strength * 0.04;
+    const startZ = -progress;
+    const endZ = Math.max(maxZ, -progress - segmentLength);
+
+    // Calculate radial spreading based on cone angle
+    const coneAngleRad = (config.coneAngle * Math.PI) / 180;
+    const startSpread = Math.tan(coneAngleRad) * Math.abs(startZ) * 0.85;
+    const endSpread = Math.tan(coneAngleRad) * Math.abs(endZ) * 0.85;
+
+    // Center offset to keep them inside the cone but spread out
+    const dirX = Math.sin(angle);
+    const dirY = Math.cos(angle);
+
+    const posAttr = geometry.getAttribute("position") as THREE.BufferAttribute;
+
+    // Update start vertex
+    posAttr.setXYZ(0, dirX * startSpread, dirY * startSpread, startZ);
+    // Update end vertex
+    posAttr.setXYZ(1, dirX * endSpread, dirY * endSpread, endZ);
+
+    posAttr.needsUpdate = true;
+
+    // Fade out as the segment approaches its maximum radius
+    const fadeOut = 1 - Math.min(1, Math.abs(startZ) / config.radius);
+    const mat = lineRef.current.material as THREE.LineBasicMaterial;
+    mat.opacity = baseLineOpacity * fadeOut;
+  });
+
+  return (
+    <primitive
+      ref={lineRef}
+      object={
+        new THREE.Line(
+          geometry,
+          new THREE.LineBasicMaterial({
+            color: "#2f6cff",
+            transparent: true,
+            opacity: baseLineOpacity,
+            linewidth: 1,
+          })
+        )
+      }
+    />
   );
 }

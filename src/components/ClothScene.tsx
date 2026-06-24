@@ -358,14 +358,36 @@ function ClothRig({
   );
 
   // Sync fan group position back to parent
+  const fanHovered = useRef(false);
+
+  const handleFanHoverStart = useCallback(() => {
+    fanHovered.current = true;
+    setControlsEnabled(false);
+    setCursor("grab");
+  }, [setControlsEnabled, setCursor]);
+
+  const handleFanHoverEnd = useCallback(() => {
+    fanHovered.current = false;
+    // Only re-enable controls if no cloth drag is active
+    if (!dragState.current.active) {
+      setControlsEnabled(true);
+      setCursor("auto");
+    }
+  }, [setControlsEnabled, setCursor]);
+
   const handleFanDragStart = useCallback(() => {
     setControlsEnabled(false);
     setCursor("grabbing");
   }, [setControlsEnabled, setCursor]);
 
   const handleFanDragEnd = useCallback(() => {
-    setControlsEnabled(true);
-    setCursor("grab");
+    // After drag ends, keep controls disabled if still hovering over fan
+    if (!fanHovered.current) {
+      setControlsEnabled(true);
+      setCursor("auto");
+    } else {
+      setCursor("grab");
+    }
     // Read the fan group's world position and propagate to parent
     if (fanGroupRef.current) {
       const pos = fanGroupRef.current.position;
@@ -378,8 +400,9 @@ function ClothRig({
     const safeDelta = Math.min(delta, 1 / 30);
     if (clothGroupRef.current) {
       const localPos = clothGroupRef.current.worldToLocal(fanEmitter.current.position.clone());
-      const normalMatrix = new THREE.Matrix3().getNormalMatrix(clothGroupRef.current.matrixWorld);
-      const localDir = fanEmitter.current.direction.clone().applyMatrix3(normalMatrix).normalize();
+      const localDir = fanEmitter.current.direction.clone()
+        .transformDirection(clothGroupRef.current.matrixWorld.clone().invert())
+        .normalize();
       _localEmitter.current = {
         ...fanEmitter.current,
         position: localPos,
@@ -416,6 +439,8 @@ function ClothRig({
         fanGroupRef={fanGroupRef}
         onDragStart={handleFanDragStart}
         onDragEnd={handleFanDragEnd}
+        onHoverStart={handleFanHoverStart}
+        onHoverEnd={handleFanHoverEnd}
         debugMode={fanDebugEnabled}
       />
       <group ref={clothGroupRef} rotation={[0.03, -0.22, -0.035]} position={[0, 0.12, 0]}>

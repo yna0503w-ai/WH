@@ -181,7 +181,7 @@ export default function App() {
 
         <ControlSlider
           label="Fan Strength"
-          max={20}
+          max={35}
           min={0}
           onChange={(value) => updateFanConfig("strength", value)}
           step={0.5}
